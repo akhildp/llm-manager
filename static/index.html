@@ -15,6 +15,9 @@
 </head>
 
 <body>
+    <!-- Mobile Overlay -->
+    <div class="sidebar-overlay" id="sidebar-overlay"></div>
+
     <!-- Sidebar -->
     <aside class="sidebar" id="sidebar">
         <div class="sidebar-header">
@@ -27,7 +30,34 @@
                         <path d="M2 12l10 5 10-5" />
                     </svg>
                 </div>
-                <h1>LLM Manager</h1>
+                <h1>AI Studio</h1>
+            </div>
+        </div>
+
+        <!-- Agent Selector -->
+        <div class="sidebar-section">
+            <h3 class="section-title">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+                    <circle cx="9" cy="7" r="4" />
+                    <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
+                    <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+                </svg>
+                AI Agent
+            </h3>
+            <div class="agent-selector-container">
+                <div class="agent-card active" data-agent="researcher">
+                    <div class="agent-info">
+                        <strong>Researcher</strong>
+                        <span>Web search & facts</span>
+                    </div>
+                </div>
+                <div class="agent-card" data-agent="analyst">
+                    <div class="agent-info">
+                        <strong>Analyst</strong>
+                        <span>Chart & pattern expert</span>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -134,7 +164,7 @@
                 System Prompt
             </h3>
             <textarea id="system-prompt" rows="4"
-                placeholder="Optional system prompt...">You are a helpful AI assistant. Use the web_browse tool whenever you need current info (news, sports, weather, etc.) to answer the user accurately. Avoid using it for greetings.</textarea>
+                placeholder="Optional system prompt...">You are a helpful AI assistant. Use tools proactively when you need current info to answer accurately.</textarea>
         </div>
     </aside>
 

@@ -31,6 +31,7 @@
     const clearChatBtn = $('#clear-chat-btn');
     const sidebarToggle = $('#sidebar-toggle');
     const sidebar = $('#sidebar');
+    const sidebarOverlay = $('#sidebar-overlay');
     const ctxSizeSlider = $('#ctx-size');
     const ctxSizeValue = $('#ctx-size-value');
     const gpuLayersSlider = $('#gpu-layers');
@@ -47,7 +48,10 @@
     const clearImageBtn = $('#clear-image-btn');
     const chatInputArea = $('#chat-input-area');
 
+    const agentCards = $$('.agent-card');
+
     // --- State ---
+    let currentAgent = 'researcher';
     let currentImageBase64 = null;
     let models = [];
     let selectedModelPath = null;
@@ -62,10 +66,36 @@
         await pollStatus();
         startStatusPolling();
         setupEventListeners();
+
+        // Initialize system prompt based on default agent
+        if (currentAgent === 'researcher') {
+            systemPromptInput.value = "You are the Researcher Agent. Expert at web searches and factual verification.";
+        }
     }
 
     // --- Event Listeners ---
     function setupEventListeners() {
+        // Agent selection
+        agentCards.forEach(card => {
+            card.addEventListener('click', () => {
+                agentCards.forEach(c => c.classList.remove('active'));
+                card.classList.add('active');
+                currentAgent = card.dataset.agent;
+
+                // Update system prompt placeholder or value based on agent
+                if (currentAgent === 'researcher') {
+                    systemPromptInput.value = "You are the Researcher Agent. Expert at web searches and factual verification.";
+                } else {
+                    systemPromptInput.value = "You are the Analyst Agent. Professional Technical Analyst specialized in price patterns.";
+                }
+
+                // Close sidebar on mobile
+                if (window.innerWidth <= 768) {
+                    toggleSidebar(false);
+                }
+            });
+        });
+
         // Dropdown toggle
         selectTrigger.addEventListener('click', (e) => {
             e.stopPropagation();
@@ -98,7 +128,10 @@
         });
         chatInput.addEventListener('input', autoResizeTextarea);
         clearChatBtn.addEventListener('click', clearChat);
-        sidebarToggle.addEventListener('click', () => sidebar.classList.toggle('open'));
+
+        // Sidebar Toggle
+        sidebarToggle.addEventListener('click', () => toggleSidebar());
+        sidebarOverlay.addEventListener('click', () => toggleSidebar(false));
 
         ctxSizeSlider.addEventListener('input', () => {
             ctxSizeValue.textContent = ctxSizeSlider.value;
@@ -175,6 +208,11 @@
                 selectModel(path);
                 modelSelect.classList.remove('open');
                 selectTrigger.classList.remove('active');
+
+                // Close sidebar on mobile
+                if (window.innerWidth <= 768) {
+                    toggleSidebar(false);
+                }
             });
         });
 
@@ -354,6 +392,11 @@
             : 'Start a model to begin chatting';
     }
 
+    function toggleSidebar(force) {
+        const isOpen = sidebar.classList.toggle('open', force);
+        sidebarOverlay.classList.toggle('open', isOpen);
+    }
+
     // --- Chat ---
     function clearChat() {
         conversationHistory = [];
@@ -414,6 +457,7 @@
                     messages: conversationHistory,
                     enable_tools: enableToolsCheckbox.checked,
                     system_prompt: systemPromptInput.value.trim(),
+                    agent: currentAgent,
                 }),
             });
 
@@ -426,6 +470,8 @@
             let fullContent = '';
             let buffer = '';
             let typingRemoved = false;
+
+            const textEl = contentEl.querySelector('.message-text');
 
             while (true) {
                 const { done, value } = await reader.read();
@@ -488,10 +534,7 @@
 
                         case 'content':
                             fullContent += event.content;
-                            // Preserve chart card if present
-                            const chartEl = contentEl.querySelector('.chart-analysis-card');
-                            contentEl.innerHTML = renderMarkdown(fullContent);
-                            if (chartEl) contentEl.prepend(chartEl);
+                            textEl.innerHTML = renderMarkdown(fullContent);
                             scrollToBottom();
                             break;
 
@@ -539,7 +582,9 @@
         el.className = `message ${role}`;
         el.innerHTML = `
             <div class="message-avatar">${role === 'user' ? 'U' : 'AI'}</div>
-            <div class="message-content">${content ? renderMarkdown(content) : ''}</div>
+            <div class="message-content">
+                <div class="message-text">${content ? renderMarkdown(content) : ''}</div>
+            </div>
         `;
         chatMessages.appendChild(el);
         scrollToBottom();
@@ -597,7 +642,14 @@
 
     // --- Markdown Rendering (lightweight) ---
     function renderMarkdown(text) {
-        let html = escapeHtml(text);
+        // Handle literal \n strings if they appear (some models escape newlines incorrectly)
+        let processed = text.replace(/\\n/g, '\n');
+
+        // Hide tool call tags (both complete and partial) from the live stream view
+        processed = processed.replace(/<tool_call>[\s\S]*?(<\/tool_call>|$)/gi, '');
+        processed = processed.replace(/<TOOLCALL>[\s\S]*?(<\/TOOLCALL>|$)/gi, '');
+
+        let html = escapeHtml(processed);
 
         // Code blocks
         html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => {
