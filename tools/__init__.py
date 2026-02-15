@@ -2,6 +2,7 @@ from tools.web_browse import (
     web_browse, WEB_BROWSE_TOOL_DEFINITION,
     web_search, WEB_SEARCH_TOOL_DEFINITION,
 )
+from tools.deep_research import deep_research, DEEP_RESEARCH_TOOL_DEFINITION
 
 TOOL_REGISTRY = {
     "web_search": {
@@ -9,8 +10,12 @@ TOOL_REGISTRY = {
         "definition": WEB_SEARCH_TOOL_DEFINITION,
     },
     "web_browse": {
-        "handler": web_browse,
         "definition": WEB_BROWSE_TOOL_DEFINITION,
+        "handler": web_browse,
+    },
+    "deep_research": {
+        "definition": DEEP_RESEARCH_TOOL_DEFINITION,
+        "handler": deep_research,
     },
 }
 

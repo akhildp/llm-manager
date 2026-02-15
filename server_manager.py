@@ -112,7 +112,7 @@ class ServerManager:
         
         candidates = [
             f"{base_name}.mmproj",
-            os.path.join(model_dir, "mmproj-model-f16.gguf"),
+            # os.path.join(model_dir, "mmproj-model-f16.gguf"), # specific checking only
             os.path.join(model_dir, f"mmproj-{os.path.basename(base_name)}.gguf"),
         ]
 
