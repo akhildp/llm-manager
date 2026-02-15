@@ -30,6 +30,7 @@ class ServerInfo:
     error_message: Optional[str] = None
     n_gpu_layers: int = 18
     ctx_size: int = 4096
+    is_multimodal: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -39,10 +40,11 @@ class ServerInfo:
             "pid": self.pid,
             "port": self.port,
             "started_at": self.started_at,
-            "uptime_seconds": round(time.time() - self.started_at, 1) if self.started_at else None,
             "error_message": self.error_message,
             "n_gpu_layers": self.n_gpu_layers,
             "ctx_size": self.ctx_size,
+            "is_multimodal": self.is_multimodal,
+            "uptime_seconds": round(time.time() - self.started_at, 1) if self.started_at is not None else None,
         }
 
 
@@ -56,6 +58,17 @@ LLAMA_SERVER_PORT = int(os.environ.get("LLAMA_SERVER_PORT", "8081"))
 HEALTH_CHECK_TIMEOUT = 120  # seconds to wait for model loading
 HEALTH_CHECK_INTERVAL = 1.0  # seconds between health checks
 
+
+MODEL_OPTIMIZATIONS = {
+    "nemotron": {
+        "n_gpu_layers": 32,
+        "ctx_size": 16384,
+    },
+    "phi": {
+        "n_gpu_layers": 32,
+        "ctx_size": 4096,
+    }
+}
 
 class ServerManager:
     """Singleton manager for a llama-server subprocess."""
@@ -95,10 +108,19 @@ class ServerManager:
         if self._info.state in (ServerState.RUNNING, ServerState.STARTING):
             await self.stop()
 
+        # Apply model-specific optimizations
+        model_name = os.path.basename(model_path)
+        model_lower = model_name.lower()
+        for key, opts in MODEL_OPTIMIZATIONS.items():
+            if key in model_lower:
+                n_gpu_layers = opts.get("n_gpu_layers", n_gpu_layers)
+                ctx_size = opts.get("ctx_size", ctx_size)
+                break
+
         self._info = ServerInfo(
             state=ServerState.STARTING,
             model_path=model_path,
-            model_name=os.path.basename(model_path),
+            model_name=model_name,
             port=LLAMA_SERVER_PORT,
             n_gpu_layers=n_gpu_layers,
             ctx_size=ctx_size,
@@ -110,15 +132,22 @@ class ServerManager:
         base_name = os.path.splitext(model_path)[0]
         model_dir = os.path.dirname(model_path)
         
+        # Specific candidates that include the model's base name
         candidates = [
             f"{base_name}.mmproj",
-            os.path.join(model_dir, "mmproj-model-f16.gguf"),
             os.path.join(model_dir, f"mmproj-{os.path.basename(base_name)}.gguf"),
+            os.path.join(model_dir, f"{os.path.basename(base_name)}-mmproj.gguf"),
         ]
+
+        # Only allow generic projectors if the model name indicates vision capability
+        vision_keywords = ["llava", "vision", "moondream", "qwen-vl", "internlm-xcomposer", "obsidian"]
+        if any(k in model_lower for k in vision_keywords):
+            candidates.append(os.path.join(model_dir, "mmproj-model-f16.gguf"))
 
         for cand in candidates:
             if os.path.exists(cand):
                 mmproj_arg = ["--mmproj", cand]
+                self._info.is_multimodal = True
                 # Vision models need extra VRAM for the image encoder;
                 # cap GPU layers to avoid OOM on 8 GB cards.
                 n_gpu_layers = min(n_gpu_layers, 10)
@@ -239,3 +268,131 @@ class ServerManager:
         """Clean up on application shutdown."""
         if self._info.state in (ServerState.RUNNING, ServerState.STARTING):
             await self.stop()
+            
+            
+class UtilityServerManager:
+    """Manager for a secondary utility model (Phi-3 Mini) on port 8082."""
+
+    _instance: Optional["UtilityServerManager"] = None
+    
+    # Phi-3 Mini 4k Instruct Q4
+    MODEL_URL = "https://huggingface.co/microsoft/Phi-3-mini-4k-instruct-gguf/resolve/main/Phi-3-mini-4k-instruct-q4.gguf"
+    MODEL_FILENAME = "Phi-3-mini-4k-instruct-q4.gguf"
+    PORT = 8082
+
+    def __new__(cls) -> "UtilityServerManager":
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._initialized = False
+        return cls._instance
+
+    def __init__(self):
+        if self._initialized:
+            return
+        self._initialized = True
+        self._process: Optional[asyncio.subprocess.Process] = None
+        self._model_path: Optional[str] = None
+        self._lock = asyncio.Lock()
+        self.is_ready = False
+
+    async def ensure_model(self):
+        """Download text utility model if missing."""
+        models_dir = os.path.expanduser("~/workspace/llama.cpp/models")
+        os.makedirs(models_dir, exist_ok=True)
+        
+        self._model_path = os.path.join(models_dir, self.MODEL_FILENAME)
+        
+        if os.path.exists(self._model_path):
+            return
+
+        print(f"[UTILITY] Downloading {self.MODEL_FILENAME}...")
+        async with httpx.AsyncClient(follow_redirects=True, timeout=600.0) as client:
+            async with client.stream("GET", self.MODEL_URL) as response:
+                response.raise_for_status()
+                with open(self._model_path, "wb") as f:
+                    async for chunk in response.aiter_bytes(chunk_size=8192):
+                        f.write(chunk)
+        print(f"[UTILITY] Download complete: {self._model_path}")
+
+    async def _start_impl(self):
+        """Internal start implementation (no lock)."""
+        await self.ensure_model()
+        
+        if self._process and self._process.returncode is None:
+            return
+
+        cmd = [
+            LLAMA_SERVER_BIN,
+            "--model", self._model_path,
+            "--port", str(self.PORT),
+            "--ctx-size", "4096",
+            "--n-gpu-layers", "0", # CPU only to save VRAM for main model
+            "--n-predict", "1024", # Max output tokens
+            "--threads", "4"
+        ]
+
+        print(f"[UTILITY] Starting server on port {self.PORT}...")
+        self._process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        
+        # Wait for health check
+        for _ in range(60):
+            try:
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(f"http://127.0.0.1:{self.PORT}/health", timeout=1.0)
+                    if resp.status_code == 200:
+                        self.is_ready = True
+                        print(f"[UTILITY] Server ready on port {self.PORT}")
+                        return
+            except Exception:
+                await asyncio.sleep(1)
+        
+        print("[UTILITY] Failed to start server within timeout.")
+
+    async def start(self):
+        """Start the utility server (thread-safe)."""
+        async with self._lock:
+            await self._start_impl()
+
+    async def _stop_impl(self):
+        """Internal stop implementation (no lock)."""
+        if self._process:
+            if self._process.returncode is None:
+                self._process.terminate()
+                try:
+                    await asyncio.wait_for(self._process.wait(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    self._process.kill()
+            self._process = None
+            self.is_ready = False
+
+    async def stop(self):
+        """Stop the utility server (thread-safe)."""
+        async with self._lock:
+            await self._stop_impl()
+
+    async def infer(self, prompt: str, **kwargs) -> str:
+        """Run inference on the utility model (thread-safe, locked)."""
+        async with self._lock:
+            if not self.is_ready:
+                await self._start_impl()
+            
+            payload = {
+                "prompt": f"<|user|>\n{prompt}<|end|>\n<|assistant|>",
+                "n_predict": 1024,
+                "temperature": 0.3,
+                "stop": ["<|end|>", "<|user|>", "<|assistant|>"]
+            }
+            # Update with any overrides
+            payload.update(kwargs)
+
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                resp = await client.post(
+                    f"http://127.0.0.1:{self.PORT}/completion",
+                    json=payload
+                )
+                resp.raise_for_status()
+                return resp.json().get("content", "").strip()

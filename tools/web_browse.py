@@ -76,45 +76,63 @@ WEB_BROWSE_TOOL_DEFINITION = {
 
 # --- Search Implementation ---
 
+# --- Search Implementation ---
+
 async def web_search(query: str) -> str:
-    """Search the web using DuckDuckGo HTML and return results."""
+    """Search the web using duckduckgo-search and return results."""
     logger.info(f"[WEB_SEARCH] query: {query}")
 
-    search_url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
-
     try:
-        async with httpx.AsyncClient(
-            follow_redirects=True, timeout=REQUEST_TIMEOUT
-        ) as client:
-            response = await client.get(search_url, headers=HEADERS)
-            response.raise_for_status()
-
-        soup = BeautifulSoup(response.text, "html.parser")
+        from ddgs import DDGS
+        
+        # synchronous DDGS usage
         results = []
-
-        # DuckDuckGo HTML returns results in .result class divs
-        for i, result in enumerate(soup.select(".result")):
-            if i >= 8:  # Limit to top 8 results
-                break
-
-            title_el = result.select_one(".result__title a, .result__a")
-            snippet_el = result.select_one(".result__snippet")
-            url_el = result.select_one(".result__url")
-
-            title = title_el.get_text(strip=True) if title_el else ""
-            snippet = snippet_el.get_text(strip=True) if snippet_el else ""
-            url = url_el.get_text(strip=True) if url_el else ""
-
-            if title or snippet:
-                results.append(f"**{title}**\nURL: {url}\n{snippet}")
+        with DDGS() as ddgs:
+            # Use text search with a limit
+            search_results = list(ddgs.text(query, max_results=5))
+            
+            for r in search_results:
+                title = r.get("title", "")
+                url = r.get("href", "")
+                snippet = r.get("body", "")
+                if title or snippet:
+                    results.append(f"**{title}**\nURL: {url}\n{snippet}")
 
         if results:
-            output = f"Search results for '{query}':\n\n" + "\n\n---\n\n".join(results)
+            raw_output = f"Search results for '{query}':\n\n" + "\n\n---\n\n".join(results)
+            
+            # --- Synthesis with Phi-3 ---
+            try:
+                from server_manager import UtilityServerManager
+                utility_manager = UtilityServerManager()
+                
+                if not utility_manager.is_ready:
+                    logger.info("[WEB_SEARCH] Starting utility server for synthesis...")
+                    # We can't await in a non-async function if this wasn't async, but web_search IS async.
+                    await utility_manager.start()
+
+                synthesis_prompt = (
+                    f"You are a strict research assistant. Your task is to summarize the provided Search Results for the query '{query}'.\n"
+                    "Rules:\n"
+                    "1. Only use information present in the Search Results.\n"
+                    "2. Do not invent facts, stories, or external information.\n"
+                    "3. If the answer is not in the results, state that.\n"
+                    "4. Be concise.\n\n"
+                    f"<search_results>\n{raw_output[:6000]}\n</search_results>"  # Truncate to 6k
+                )
+                
+                logger.info(f"[WEB_SEARCH] Sending results to Phi-3 for synthesis...")
+                # Use low temperature to reduce hallucinations/creativity
+                synthesis = await utility_manager.infer(synthesis_prompt, temperature=0.0)
+                logger.info(f"[WEB_SEARCH] Synthesis complete ({len(synthesis)} chars).")
+                return f"Synthesis of Search Results for '{query}':\n\n{synthesis}\n\n[Source Data: {len(results)} results]"
+
+            except Exception as e:
+                logger.error(f"[WEB_SEARCH] Synthesis failed: {e}")
+                return raw_output[:MAX_CONTENT_CHARS]
+
         else:
-            # Fallback: try to extract any text from the page
-            text = soup.get_text(separator="\n", strip=True)
-            lines = [l.strip() for l in text.splitlines() if l.strip()]
-            output = f"Search results for '{query}':\n\n" + "\n".join(lines[:30])
+            output = f"No results found for '{query}'."
 
         logger.info(f"[WEB_SEARCH] Found {len(results)} results")
         return output[:MAX_CONTENT_CHARS]
@@ -164,8 +182,31 @@ async def web_browse(url: str) -> str:
         if len(text) > MAX_CONTENT_CHARS:
             text = text[:MAX_CONTENT_CHARS] + "\n\n[... content truncated ...]"
 
-        logger.info(f"[WEB_BROWSE] Got {len(text)} chars")
-        return f"Content from {url}:\n\n{text}"
+        logger.info(f"[WEB_BROWSE] Got {len(text)} chars from {url}")
+        
+        # --- Summarization with Phi-3 ---
+        from server_manager import UtilityServerManager
+        utility_manager = UtilityServerManager()
+        
+        if not utility_manager.is_ready:
+            # If not started, try to start it (non-blocking if possible, but here we await)
+            logger.info("[WEB_BROWSE] Starting utility server for summarization...")
+            await utility_manager.start()
+
+        summary_prompt = (
+            f"Please summarize the following web page content concisely for a researcher. "
+            f"Focus on the main facts and details relevant to the page title.\n\n"
+            f"Content:\n{text}"
+        )
+
+        try:
+            logger.info(f"[WEB_BROWSE] Sending {len(text)} chars to Phi-3 for summarization...")
+            summary = await utility_manager.infer(summary_prompt)
+            logger.info(f"[WEB_BROWSE] Summarization complete ({len(summary)} chars).")
+            return f"Summary of {url}:\n\n{summary}\n\n[Original URL: {url}]"
+        except Exception as e:
+            logger.error(f"[WEB_BROWSE] Summarization failed: {e}")
+            return f"Content from {url} (Summarization failed):\n\n{text}"
 
     except Exception as e:
         logger.error(f"[WEB_BROWSE] Error: {e}")
