@@ -453,38 +453,6 @@
                     }
 
                     switch (event.type) {
-                        case 'chart_analysis': {
-                            console.log('[CHART] Analysis event:', event);
-                            const chartCard = document.createElement('div');
-                            chartCard.className = 'chart-analysis-card';
-
-                            let html = '';
-                            if (event.patterns && event.patterns.length > 0) {
-                                html += '<strong>📊 Patterns Detected</strong>';
-                                for (const p of event.patterns) {
-                                    const barWidth = Math.min(p.probability, 100);
-                                    html += `<div class="chart-pattern-row">
-                                        <span class="pattern-label">${escapeHtml(p.label)}</span>
-                                        <div class="pattern-bar-bg"><div class="pattern-bar" style="width:${barWidth}%"></div></div>
-                                        <span class="pattern-pct">${p.probability}%</span>
-                                    </div>`;
-                                }
-                            } else {
-                                html += `<strong>📊 Analyzing chart...</strong>`;
-                            }
-
-                            // Render annotated image at the bottom
-                            if (event.annotated_image) {
-                                html += `<div class="chart-annotated-wrapper" style="margin-top: 12px;">
-                                    <img src="data:image/jpeg;base64,${event.annotated_image}" class="chart-annotated-img" style="max-width: 800px; width: 100%;" alt="Annotated Chart" title="Click to expand" onclick="window.open(this.src, '_blank')">
-                                </div>`;
-                            }
-
-                            chartCard.innerHTML = html;
-                            contentEl.appendChild(chartCard);
-                            scrollToBottom();
-                            break;
-                        }
 
                         case 'content':
                             fullContent += event.content;

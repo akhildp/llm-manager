@@ -13,7 +13,6 @@ from fastapi.responses import StreamingResponse
 
 from server_manager import ServerManager, ServerState
 from tools import get_tool_definitions, execute_tool
-from tools.chart_recognizer import classify_chart
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 logger = logging.getLogger("chat")
@@ -51,30 +50,7 @@ async def chat(request: Request):
     if not messages or messages[0].get("role") != "system":
         messages.insert(0, {"role": "system", "content": effective_system})
 
-    # Auto-detect images and run chart-recognizer
-    messages, chart_event = _preprocess_images(messages)
-
     async def _generate():
-        # If chart analysis was performed, emit it as an event first
-        # If chart analysis was performed, emit it as an event first
-        # If chart analysis was performed, emit it as an event first
-        if chart_event:
-            logger.info("[CHAT] Chart event detected. Short-circuiting LLM.")
-            yield f"data: {json.dumps(chart_event)}\n\n"
-            
-            # Short-circuit: Skip LLM entirely as requested
-            msg = {
-                "choices": [{
-                    "delta": {"content": "\n\n**Analysis Complete (YOLOv8 - FINAL).**\nSee the detected patterns and annotated chart above."},
-                    "finish_reason": "stop"
-                }]
-            }
-            yield f"data: {json.dumps(msg)}\n\n"
-            yield "data: [DONE]\n\n"
-            logger.info("[CHAT] Exiting _generate (short-circuit).")
-            return
-
-        logger.info("[CHAT] No chart event. Proceeding to LLM.")
         effective_tools = enable_tools
         async for chunk in _stream_chat(messages, effective_tools, manager):
             yield chunk
@@ -90,111 +66,6 @@ async def chat(request: Request):
     )
 
 
-def _preprocess_images(messages: list) -> tuple[list, dict | None]:
-    """
-    Scan messages for images.  If found:
-      1. Run through YOLOv8 chart pattern detector.
-      2. Inject detected patterns into a system prompt for the LLM.
-      3. Keep the image in the message so vision models can see it.
-    Returns (modified_messages, chart_event_or_None).
-    """
-    chart_event = None
-
-    # Only check the LATEST message for charts to avoid persistent short-circuiting
-    if messages:
-        msg = messages[-1]
-        if msg.get("role") == "user":
-            content = msg.get("content")
-            if isinstance(content, list):
-                # Look for an image_url part
-                image_data = None
-                for part in content:
-                    if isinstance(part, dict) and part.get("type") == "image_url":
-                        url = part.get("image_url", {}).get("url", "")
-                        if url:
-                            image_data = url
-                            break
-
-                if image_data:
-                    # Run YOLOv8 chart pattern detection
-                    patterns = []
-                    try:
-                        result = classify_chart(image_data, top_k=10)
-                        patterns = result.get("patterns", [])
-                        chart_event = {
-                            "type": "chart_analysis",
-                            "is_chart": result.get("is_chart", False),
-                            "patterns": patterns,
-                            "summary": result.get("summary", ""),
-                            "annotated_image": result.get("annotated_image"),
-                        }
-                        logger.info(f"[CHART] Detected {len(patterns)} patterns: {patterns}")
-                    except Exception as e:
-                        logger.error(f"[CHART] Detection failed: {e}")
-
-                    # Build pattern context for the LLM
-                    if patterns:
-                        pattern_lines = []
-                        for p in patterns:
-                            # Generate location description from bbox_norm
-                            loc = ""
-                            bn = p.get('bbox_norm')
-                            if bn:
-                                cx = (bn[0] + bn[2]) / 2
-                                cy = (bn[1] + bn[3]) / 2
-                                w = bn[2] - bn[0]
-                                h = bn[3] - bn[1]
-                                
-                                h_pos = "left" if cx < 0.33 else "right" if cx > 0.66 else "center"
-                                v_pos = "top" if cy < 0.33 else "bottom" if cy > 0.66 else "middle"
-                                
-                                if w > 0.8: h_pos = "full width"
-                                if h > 0.8: v_pos = "full height"
-                                
-                                loc = f"[{v_pos}-{h_pos}]"
-
-                            pattern_lines.append(f"- {p['label']} ({p['probability']}% confidence) {loc}")
-                        pattern_text = "\n".join(pattern_lines)
-
-                        chart_system = {
-                            "role": "system",
-                            "content": (
-                                "You are a professional Technical Analyst AI. \n"
-                                "The user has provided raw pattern data from a specialized chart analysis tool.\n"
-                                "Detected Patterns:\n"
-                                f"{pattern_text}\n\n"
-                                "Your Task:\n"
-                                "1. Analyze these patterns as FACTUAL DATA points.\n"
-                                "2. Provide trading recommendations based SOLELY on standard technical analysis theory for these patterns.\n"
-                                "3. Do NOT mention that you cannot see the image. Assume the patterns are correct.\n"
-                                "5. Discuss the probability and typical outcomes for these setups (e.g. M-Head implies bearish reversal)."
-                            ),
-                        }
-                    else:
-                        chart_system = {
-                            "role": "system",
-                            "content": (
-                                "The user uploaded a trading chart, but the AI pattern detector found NO specific patterns.\n"
-                                "Since vision analysis is disabled, you cannot see the chart.\n"
-                                "Provide general trading advice or ask the user to describe the chart."
-                            ),
-                        }
-
-                    # STRIP THE IMAGE so the LLM doesn't hallucinate or waste compute
-                    # We replace the complex content list with just the text part
-                    user_text = ""
-                    for part in content:
-                        if isinstance(part, dict) and part.get("type") == "text":
-                            user_text += part.get("text", "")
-                    
-                    # Update the user message to be text-only
-                    msg["content"] = user_text if user_text else "Analyze this chart based on the detected patterns."
-
-                    # Insert chart system prompt right before the user message
-                    idx = messages.index(msg)
-                    messages.insert(idx, chart_system)
-
-    return messages, chart_event
 
 
 def _extract_tool_calls_from_text(text: str) -> list[dict] | None:
