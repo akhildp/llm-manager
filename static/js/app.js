@@ -478,6 +478,19 @@
                             contentEl.innerHTML += `<div style="color: var(--error); margin-top: 8px;">⚠ ${escapeHtml(event.content)}</div>`;
                             break;
 
+                        case 'metrics':
+                            if (event.tokens_per_sec) {
+                                let metaEl = contentEl.querySelector('.message-meta');
+                                if (!metaEl) {
+                                    metaEl = document.createElement('div');
+                                    metaEl.className = 'message-meta';
+                                    contentEl.appendChild(metaEl);
+                                }
+                                metaEl.textContent = `${event.tokens_per_sec} tokens/sec`;
+                            }
+                            scrollToBottom();
+                            break;
+
                         case 'done':
                             break;
                     }

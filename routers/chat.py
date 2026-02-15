@@ -5,6 +5,8 @@ import logging
 import random
 import re
 import string
+import time
+from datetime import datetime
 from typing import Optional
 
 import httpx
@@ -37,6 +39,7 @@ async def chat(request: Request):
 
     # Guidance for balanced tool use
     default_guidance = (
+        f"Current Date: {datetime.now().strftime('%Y-%m-%d')}\n"
         "You are a helpful AI assistant. Use tools like 'web_search' proactively when "
         "the user asks for real-world facts, current events, sports scores, or news. "
         "However, do NOT use tools for simple greetings like 'Hello' or casual small talk."
@@ -134,6 +137,10 @@ async def _stream_chat(messages: list, enable_tools: bool, manager: ServerManage
         full_content = ""
         tool_calls_collected = []
         current_tool_call = None
+        
+        # Metrics tracking
+        start_time = time.time()
+        token_count = 0
 
         try:
             async with httpx.AsyncClient(timeout=300.0) as client:
@@ -173,6 +180,7 @@ async def _stream_chat(messages: list, enable_tools: bool, manager: ServerManage
                         content = delta.get("content", "")
                         if content:
                             full_content += content
+                            token_count += 1 # Rough estimate: 1 chunk ~= 1 token
                             yield f"data: {json.dumps({'type': 'content', 'content': content})}\n\n"
 
                         # Handle tool calls in the delta
@@ -231,6 +239,12 @@ async def _stream_chat(messages: list, enable_tools: bool, manager: ServerManage
 
         # If no tool calls, we're done
         if not tool_calls_collected:
+            # Emit metrics before done
+            duration = time.time() - start_time
+            if duration > 0 and token_count > 0:
+                t_s = round(token_count / duration, 1)
+                yield f"data: {json.dumps({'type': 'metrics', 'tokens_per_sec': t_s})}\n\n"
+            
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
             return
 

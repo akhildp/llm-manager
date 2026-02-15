@@ -1225,4 +1225,12 @@ input[type="checkbox"]:checked::after {
     color: var(--accent-start);
     font-weight: 600;
     font-size: 0.8rem;
+}/* Message Metadata */
+.message-meta {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    margin-top: 4px;
+    text-align: right;
+    font-family: var(--font-mono);
+    opacity: 0.8;
 }
