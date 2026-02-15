@@ -32,6 +32,14 @@ async def chat(request: Request):
     messages = body.get("messages", [])
     enable_tools = body.get("enable_tools", True)
     system_prompt = body.get("system_prompt", "")
+    
+    # Extract generation settings
+    gen_settings = {
+        "max_tokens": body.get("max_tokens", 2048),
+        "temperature": body.get("temperature", 0.7),
+        "repeat_penalty": body.get("repeat_penalty", 1.1),
+        "top_p": body.get("top_p", 0.9),
+    }
 
     manager = ServerManager()
     if manager.info.state != ServerState.RUNNING:
@@ -55,7 +63,7 @@ async def chat(request: Request):
 
     async def _generate():
         effective_tools = enable_tools
-        async for chunk in _stream_chat(messages, effective_tools, manager):
+        async for chunk in _stream_chat(messages, effective_tools, manager, gen_settings):
             yield chunk
 
     return StreamingResponse(
@@ -67,8 +75,6 @@ async def chat(request: Request):
             "X-Accel-Buffering": "no",
         },
     )
-
-
 
 
 def _extract_tool_calls_from_text(text: str) -> list[dict] | None:
@@ -112,7 +118,7 @@ def _extract_tool_calls_from_text(text: str) -> list[dict] | None:
     return results if results else None
 
 
-async def _stream_chat(messages: list, enable_tools: bool, manager: ServerManager):
+async def _stream_chat(messages: list, enable_tools: bool, manager: ServerManager, gen_settings: dict):
     """Generator that streams chat responses and handles tool calls."""
     base_url = f"http://127.0.0.1:{manager.info.port}"
     max_tool_rounds = 5  # prevent infinite tool-call loops
@@ -122,8 +128,10 @@ async def _stream_chat(messages: list, enable_tools: bool, manager: ServerManage
             "model": manager.info.model_name,
             "messages": messages,
             "stream": True,
-            "temperature": 0.7,
-            "max_tokens": 2048,
+            "temperature": gen_settings["temperature"],
+            "max_tokens": gen_settings["max_tokens"],
+            "repeat_penalty": gen_settings["repeat_penalty"],
+            "top_p": gen_settings["top_p"],
         }
 
         if enable_tools and round_num < max_tool_rounds:

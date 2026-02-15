@@ -47,7 +47,29 @@ def _get_model_info(path: Path) -> dict:
         "size_gb": size_gb,
         "quantization": quant,
         "modified": stat.st_mtime,
+        "default_settings": _get_model_defaults(name, str(path)),
     }
+
+
+# Hardcoded defaults for specific models
+MODEL_DEFAULTS = {
+    "Huihui-Qwen3-VL-4B-Instruct-abliterated-Q8_0": {
+        "ctx_size": 8192,
+        "n_gpu_layers": 28,
+        "max_tokens": 2048,
+        "temperature": 0.7,
+        "repeat_penalty": 1.10,
+        "top_p": 0.9
+    }
+}
+
+def _get_model_defaults(name: str, path: str) -> dict | None:
+    """Return specific defaults if defined for this model."""
+    # Check for exact name match or if key is part of filename
+    for key, settings in MODEL_DEFAULTS.items():
+        if key in name or key in path:
+            return settings
+    return None
 
 
 @router.get("")

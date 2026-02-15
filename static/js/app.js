@@ -100,12 +100,102 @@
         clearChatBtn.addEventListener('click', clearChat);
         sidebarToggle.addEventListener('click', () => sidebar.classList.toggle('open'));
 
+
+
+        // Generation settings listeners
+        const settings = [
+            { id: 'max-tokens', valueId: 'max-tokens-value' },
+            { id: 'temperature', valueId: 'temperature-value' },
+            { id: 'repeat-penalty', valueId: 'repeat-penalty-value' },
+            { id: 'top-p', valueId: 'top-p-value' }
+        ];
+
+        settings.forEach(setting => {
+            const slider = document.getElementById(setting.id);
+            const valueDisplay = document.getElementById(setting.valueId);
+            if (slider && valueDisplay) {
+                slider.addEventListener('input', () => {
+                    valueDisplay.textContent = slider.value;
+                });
+            } else {
+                console.warn(`Missing DOM element for setting: ${setting.id}`);
+            }
+        });
+
+        // Context and GPU layers listeners
         ctxSizeSlider.addEventListener('input', () => {
             ctxSizeValue.textContent = ctxSizeSlider.value;
         });
         gpuLayersSlider.addEventListener('input', () => {
             gpuLayersValue.textContent = gpuLayersSlider.value;
         });
+    }
+
+    // --- Model Settings Management ---
+
+    const GLOBAL_DEFAULTS = {
+        ctx_size: 4096,
+        n_gpu_layers: 20,
+        max_tokens: 2048,
+        temperature: 0.7,
+        repeat_penalty: 1.1,
+        top_p: 0.9
+    };
+
+    function loadModelSettings(modelPath) {
+        if (!modelPath) return;
+
+        let settings = null;
+
+        // 1. Try to find model in the loaded models list to see if it has defaults
+        const model = models.find(m => m.path === modelPath);
+        if (model && model.default_settings) {
+            settings = model.default_settings;
+        }
+
+        // 2. Fallback to Global Defaults
+        if (!settings) {
+            settings = GLOBAL_DEFAULTS;
+        }
+
+        // Apply settings to UI
+        if (settings.ctx_size !== undefined) {
+            ctxSizeSlider.value = settings.ctx_size;
+            ctxSizeValue.textContent = settings.ctx_size;
+        }
+        if (settings.n_gpu_layers !== undefined) {
+            gpuLayersSlider.value = settings.n_gpu_layers;
+            gpuLayersValue.textContent = settings.n_gpu_layers;
+        }
+        if (settings.max_tokens !== undefined) {
+            const el = document.getElementById('max-tokens');
+            if (el) {
+                el.value = settings.max_tokens;
+                document.getElementById('max-tokens-value').textContent = settings.max_tokens;
+            }
+        }
+        if (settings.temperature !== undefined) {
+            const el = document.getElementById('temperature');
+            if (el) {
+                el.value = settings.temperature;
+                document.getElementById('temperature-value').textContent = settings.temperature;
+            }
+        }
+        if (settings.repeat_penalty !== undefined) {
+            const el = document.getElementById('repeat-penalty');
+            if (el) {
+                el.value = settings.repeat_penalty;
+                document.getElementById('repeat-penalty-value').textContent = settings.repeat_penalty;
+            }
+        }
+        if (settings.top_p !== undefined) {
+            const el = document.getElementById('top-p');
+            if (el) {
+                el.value = settings.top_p;
+                document.getElementById('top-p-value').textContent = settings.top_p;
+            }
+        }
+
 
         // Vision Events
         if (attachBtn) {
@@ -220,6 +310,7 @@
 
     function selectModel(path) {
         selectedModelPath = path;
+        loadModelSettings(path); // Load persisted or default settings
         renderModels();
 
         // Check for vision support
@@ -304,6 +395,7 @@
             // If user hasn't manually selected a different model, sync from server
             if (!selectedModelPath || prevState === 'idle' || prevState === 'starting') {
                 selectedModelPath = data.model_path;
+                loadModelSettings(selectedModelPath);
             }
         }
 
@@ -414,6 +506,11 @@
                     messages: conversationHistory,
                     enable_tools: enableToolsCheckbox.checked,
                     system_prompt: systemPromptInput.value.trim(),
+                    // Generation settings
+                    max_tokens: parseInt(document.getElementById('max-tokens').value),
+                    temperature: parseFloat(document.getElementById('temperature').value),
+                    repeat_penalty: parseFloat(document.getElementById('repeat-penalty').value),
+                    top_p: parseFloat(document.getElementById('top-p').value),
                 }),
             });
 
