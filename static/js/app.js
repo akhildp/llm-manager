@@ -549,6 +549,10 @@
                             scrollToBottom();
                             break;
 
+                        case 'tool_update':
+                            updateToolStatus(contentEl, event.tool, event.status, event.model, event.t_s);
+                            break;
+
                         case 'error':
                             contentEl.innerHTML += `<div style="color: var(--error); margin-top: 8px;">⚠ ${escapeHtml(event.content)}</div>`;
                             break;
@@ -620,7 +624,8 @@
             </div>
             <div class="tool-call-body">${escapeHtml(argsStr)}</div>
             <div class="tool-call-status ${status}">
-                ${status === 'running' ? 'Executing...' : 'Done'}
+                <span class="status-label">${status === 'running' ? 'Executing...' : 'Done'}</span>
+                <span class="tool-perf-info"></span>
             </div>
         `;
         return card;
@@ -634,7 +639,25 @@
                 body.textContent += '\n\n--- Result ---\n' + result;
                 const status = card.querySelector('.tool-call-status');
                 status.className = 'tool-call-status';
-                status.textContent = '✓ Complete';
+                status.querySelector('.status-label').textContent = '✓ Complete';
+                break;
+            }
+        }
+    }
+
+    function updateToolStatus(container, toolName, statusMsg, modelName, t_s) {
+        const cards = container.querySelectorAll('.tool-call-card');
+        for (const card of cards) {
+            if (card.dataset.tool === toolName) {
+                if (statusMsg) {
+                    card.querySelector('.status-label').textContent = statusMsg;
+                }
+                const perfEl = card.querySelector('.tool-perf-info');
+                if (modelName) {
+                    let text = `[${modelName}]`;
+                    if (t_s) text += ` ${t_s.toFixed(1)} t/s`;
+                    perfEl.textContent = text;
+                }
                 break;
             }
         }

@@ -61,12 +61,12 @@ HEALTH_CHECK_INTERVAL = 1.0  # seconds between health checks
 
 MODEL_OPTIMIZATIONS = {
     "nemotron": {
-        "n_gpu_layers": 32,
-        "ctx_size": 16384,
+        "n_gpu_layers": 18, # Reduced to 18 for stability
+        "ctx_size": 8192,   
     },
     "phi": {
-        "n_gpu_layers": 32,
-        "ctx_size": 4096,
+        "n_gpu_layers": 10, # Reduced to 10 for stability
+        "ctx_size": 2048,   # Summaries are small
     }
 }
 
@@ -191,7 +191,34 @@ class ServerManager:
 
         return self._info
 
-    async def stop(self) -> ServerInfo:
+    async def infer(self, prompt: str, **kwargs) -> dict:
+        """Run inference on the main model. Returns {content, t_s}."""
+        if self._info.state != ServerState.RUNNING:
+            return {"content": "Error: Main model is not running.", "t_s": 0}
+
+        payload = {
+            "prompt": f"<|user|>\n{prompt}<|end|>\n<|assistant|>",
+            "n_predict": 1024,
+            "temperature": 0.3,
+            "stop": ["<|end|>", "<|user|>", "<|assistant|>"]
+        }
+        payload.update(kwargs)
+
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            try:
+                resp = await client.post(
+                    f"http://127.0.0.1:{LLAMA_SERVER_PORT}/completion",
+                    json=payload
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                content = data.get("content", "").strip()
+                t_s = data.get("timings", {}).get("predicted_per_second", 0)
+                return {"content": content, "t_s": t_s}
+            except Exception as e:
+                return {"content": f"Error during main model inference: {str(e)}", "t_s": 0}
+
+    async def stop(self) -> None:
         """Stop the running llama-server."""
         if self._process is None or self._info.state == ServerState.IDLE:
             return self._info
@@ -325,17 +352,20 @@ class UtilityServerManager:
             LLAMA_SERVER_BIN,
             "--model", self._model_path,
             "--port", str(self.PORT),
-            "--ctx-size", "4096",
-            "--n-gpu-layers", "0", # CPU only to save VRAM for main model
-            "--n-predict", "1024", # Max output tokens
+            "--ctx-size", "2048",
+            "--n-gpu-layers", "10", # Reduced to 10 for stability
+            "--flash-attn", "on",
+            "--n-predict", "1024", 
             "--threads", "4"
         ]
 
-        print(f"[UTILITY] Starting server on port {self.PORT}...")
+        log_path = os.path.expanduser("~/workspace/llm-manager/utility_server.log")
+        print(f"[UTILITY] Starting server on port {self.PORT}, logs: {log_path}")
+        
         self._process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
+            stderr=open(log_path, "w"),
         )
         
         # Wait for health check
@@ -374,8 +404,8 @@ class UtilityServerManager:
         async with self._lock:
             await self._stop_impl()
 
-    async def infer(self, prompt: str, **kwargs) -> str:
-        """Run inference on the utility model (thread-safe, locked)."""
+    async def infer(self, prompt: str, **kwargs) -> dict:
+        """Run inference on the utility model. Returns {content, t_s}."""
         async with self._lock:
             if not self.is_ready:
                 await self._start_impl()
@@ -395,4 +425,7 @@ class UtilityServerManager:
                     json=payload
                 )
                 resp.raise_for_status()
-                return resp.json().get("content", "").strip()
+            data = resp.json()
+            content = data.get("content", "").strip()
+            t_s = data.get("timings", {}).get("predicted_per_second", 0)
+            return {"content": content, "t_s": t_s}

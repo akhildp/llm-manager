@@ -14,6 +14,7 @@ from fastapi.responses import StreamingResponse
 from server_manager import ServerManager, ServerState
 from tools import get_tool_definitions, execute_tool
 from tools.chart_recognizer import classify_chart
+from agents import ResearcherAgent, AnalystAgent
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 logger = logging.getLogger("chat")
@@ -31,32 +32,41 @@ async def chat(request: Request):
     messages = body.get("messages", [])
     enable_tools = body.get("enable_tools", True)
     system_prompt = body.get("system_prompt", "")
+    agent_type = body.get("agent", "researcher")
+
+    # Initialize the selected agent
+    if agent_type == "analyst":
+        agent = AnalystAgent()
+    else:
+        agent = ResearcherAgent()
 
     manager = ServerManager()
     if manager.info.state != ServerState.RUNNING:
         return {"error": "No model is currently running. Start a model first."}
 
-    # Guidance for balanced tool use
-    default_guidance = (
-        "You are a helpful AI assistant. Use tools like 'web_search' proactively when "
-        "the user asks for real-world facts, current events, sports scores, or news. "
-        "However, do NOT use tools for simple greetings like 'Hello' or casual small talk."
-    )
+    # Use Agent's logic for prompt and tool enablement
+    agent_config = await agent.process(messages, tools_enabled=enable_tools)
+    effective_system = agent_config["system_prompt"]
     
+    # Enable tools based on agent preference (Analyst might disable them)
+    enable_tools = agent_config.get("tool_choice", "auto") != "none"
+
     if system_prompt:
-        effective_system = f"{default_guidance}\n\nUser specific instructions: {system_prompt}"
-    else:
-        effective_system = default_guidance
+        effective_system = f"{effective_system}\n\nUser specific instructions: {system_prompt}"
 
     if not messages or messages[0].get("role") != "system":
         messages.insert(0, {"role": "system", "content": effective_system})
 
     # Auto-detect images and run chart-recognizer
-    messages, chart_event = _preprocess_images(messages)
+    messages, chart_event = _preprocess_images(messages, manager)
+
+    # Auto-detect search intent (Phi-3)
+    # Only run if no chart event (chart takes precedence) and agent is Researcher
+    search_query = None
+    if not chart_event and agent_type == "researcher":
+        search_query = await _detect_search_intent(messages, manager)
 
     async def _generate():
-        # If chart analysis was performed, emit it as an event first
-        # If chart analysis was performed, emit it as an event first
         # If chart analysis was performed, emit it as an event first
         if chart_event:
             logger.info("[CHAT] Chart event detected. Short-circuiting LLM.")
@@ -74,7 +84,36 @@ async def chat(request: Request):
             logger.info("[CHAT] Exiting _generate (short-circuit).")
             return
 
-        logger.info("[CHAT] No chart event. Proceeding to LLM.")
+        # If search intent detected, execute search with UI feedback
+        if search_query:
+            # 1. Emit tool_start event
+            yield f"data: {json.dumps({'type': 'tool_start', 'tool': 'web_search', 'args': {'query': search_query}})}\n\n"
+            
+            # 2. Execute search and stream progress
+            from tools.web_browse import web_search
+            result = ""
+            async for event in web_search(search_query):
+                if event["type"] == "progress":
+                    yield f"data: {json.dumps({
+                        'type': 'tool_update', 
+                        'tool': 'web_search', 
+                        'status': event['msg'],
+                        'model': event.get('model'),
+                        't_s': event.get('t_s', 0)
+                    })}\n\n"
+                elif event["type"] == "result":
+                    result = event["content"]
+            
+            # 3. Emit tool_result event
+            yield f"data: {json.dumps({'type': 'tool_result', 'tool': 'web_search', 'result': result})}\n\n"
+            
+            # 4. Stream result as content
+            yield f"data: {json.dumps({'type': 'content', 'content': result})}\n\n"
+            yield "data: [DONE]\n\n"
+            logger.info("[CHAT] Exiting _generate (search short-circuit).")
+            return
+
+        logger.info("[CHAT] No chart or search event. Proceeding to LLM.")
         effective_tools = enable_tools
         async for chunk in _stream_chat(messages, effective_tools, manager):
             yield chunk
@@ -90,139 +129,197 @@ async def chat(request: Request):
     )
 
 
-def _preprocess_images(messages: list) -> tuple[list, dict | None]:
+def _preprocess_images(messages: list, manager: ServerManager) -> tuple[list, dict | None]:
     """
-    Scan messages for images.  If found:
-      1. Run through YOLOv8 chart pattern detector.
-      2. Inject detected patterns into a system prompt for the LLM.
-      3. Keep the image in the message so vision models can see it.
+    Scan messages for images.
+    1. For the LATEST message: if found, run YOLOv8 and create chart_event.
+    2. For ALL messages: if model is text-only, strip images to save context/prevent errors.
     Returns (modified_messages, chart_event_or_None).
     """
     chart_event = None
+    is_multimodal = getattr(manager.info, 'is_multimodal', False)
 
-    # Only check the LATEST message for charts to avoid persistent short-circuiting
-    if messages:
-        msg = messages[-1]
-        if msg.get("role") == "user":
-            content = msg.get("content")
-            if isinstance(content, list):
-                # Look for an image_url part
-                image_data = None
-                for part in content:
-                    if isinstance(part, dict) and part.get("type") == "image_url":
+    for i, msg in enumerate(messages):
+        role = msg.get("role")
+        content = msg.get("content")
+        
+        if role == "user" and isinstance(content, list):
+            # Extract text and image parts
+            image_data = None
+            has_image = False
+            user_text = ""
+            for part in content:
+                if isinstance(part, dict):
+                    if part.get("type") == "image_url":
+                        has_image = True
                         url = part.get("image_url", {}).get("url", "")
-                        if url:
-                            image_data = url
-                            break
+                        if url: image_data = url
+                    elif part.get("type") == "text":
+                        user_text += part.get("text", "")
 
-                if image_data:
-                    # Run YOLOv8 chart pattern detection
-                    patterns = []
-                    try:
-                        result = classify_chart(image_data, top_k=10)
-                        patterns = result.get("patterns", [])
-                        chart_event = {
-                            "type": "chart_analysis",
-                            "is_chart": result.get("is_chart", False),
-                            "patterns": patterns,
-                            "summary": result.get("summary", ""),
-                            "annotated_image": result.get("annotated_image"),
-                        }
-                        logger.info(f"[CHART] Detected {len(patterns)} patterns: {patterns}")
-                    except Exception as e:
-                        logger.error(f"[CHART] Detection failed: {e}")
-
-                    # Build pattern context for the LLM
-                    if patterns:
-                        pattern_lines = []
-                        for p in patterns:
-                            # Generate location description from bbox_norm
-                            loc = ""
-                            bn = p.get('bbox_norm')
-                            if bn:
-                                cx = (bn[0] + bn[2]) / 2
-                                cy = (bn[1] + bn[3]) / 2
-                                w = bn[2] - bn[0]
-                                h = bn[3] - bn[1]
-                                
-                                h_pos = "left" if cx < 0.33 else "right" if cx > 0.66 else "center"
-                                v_pos = "top" if cy < 0.33 else "bottom" if cy > 0.66 else "middle"
-                                
-                                if w > 0.8: h_pos = "full width"
-                                if h > 0.8: v_pos = "full height"
-                                
-                                loc = f"[{v_pos}-{h_pos}]"
-
-                            pattern_lines.append(f"- {p['label']} ({p['probability']}% confidence) {loc}")
-                        pattern_text = "\n".join(pattern_lines)
-
-                        chart_system = {
-                            "role": "system",
-                            "content": (
-                                "You are a professional Technical Analyst AI. \n"
-                                "The user has provided raw pattern data from a specialized chart analysis tool.\n"
-                                "Detected Patterns:\n"
-                                f"{pattern_text}\n\n"
-                                "Your Task:\n"
-                                "1. Analyze these patterns as FACTUAL DATA points.\n"
-                                "2. Provide trading recommendations based SOLELY on standard technical analysis theory for these patterns.\n"
-                                "3. Do NOT mention that you cannot see the image. Assume the patterns are correct.\n"
-                                "5. Discuss the probability and typical outcomes for these setups (e.g. M-Head implies bearish reversal)."
-                            ),
-                        }
-                    else:
-                        chart_system = {
-                            "role": "system",
-                            "content": (
-                                "The user uploaded a trading chart, but the AI pattern detector found NO specific patterns.\n"
-                                "Since vision analysis is disabled, you cannot see the chart.\n"
-                                "Provide general trading advice or ask the user to describe the chart."
-                            ),
-                        }
-
-                    # STRIP THE IMAGE so the LLM doesn't hallucinate or waste compute
-                    # We replace the complex content list with just the text part
-                    user_text = ""
-                    for part in content:
-                        if isinstance(part, dict) and part.get("type") == "text":
-                            user_text += part.get("text", "")
+            # If this is the LATEST message and has an image, run YOLO
+            if i == len(messages) - 1 and image_data:
+                try:
+                    result = classify_chart(image_data, top_k=10)
+                    patterns = result.get("patterns", [])
+                    chart_event = {
+                        "type": "chart_analysis",
+                        "is_chart": result.get("is_chart", False),
+                        "patterns": patterns,
+                        "summary": result.get("summary", ""),
+                        "annotated_image": result.get("annotated_image"),
+                    }
+                    logger.info(f"[CHART] Detected {len(patterns)} patterns for latest message.")
                     
-                    # Update the user message to be text-only
-                    msg["content"] = user_text if user_text else "Analyze this chart based on the detected patterns."
+                    # Prepend pattern summary to user text for the LLM
+                    if patterns:
+                        pattern_lines = [f"- {p['label']} ({p['probability']}% confidence)" for p in patterns]
+                        pattern_text = "\n".join(pattern_lines)
+                        
+                        # We'll prepend this to the user text so the model knows what was found
+                        if user_text:
+                            user_text = f"[Image Analysis: {pattern_text}]\n{user_text}"
+                        else:
+                            user_text = f"Analyze this chart. Detected: {pattern_text}"
 
-                    # Insert chart system prompt right before the user message
-                    idx = messages.index(msg)
-                    messages.insert(idx, chart_system)
+                except Exception as e:
+                    logger.error(f"[CHART] Detection failed: {e}")
+
+            # STRIP images if model is text-only or for processed history turns
+            if has_image and (not is_multimodal or i < len(messages) - 1):
+                msg["content"] = user_text if user_text else "Image input (vision analysis disabled)"
+                logger.info(f"[STRIP] Removed image from message {i} (multimodal={is_multimodal}).")
 
     return messages, chart_event
+
+
+async def _detect_search_intent(messages: list, manager: ServerManager) -> str | None:
+    """
+    Check if the latest message requires a web search using Phi-3.
+    Returns AN OPTIMIZED search_query string if YES, else None.
+    """
+    if not messages:
+        return None
+        
+    last_msg = messages[-1]
+    if last_msg.get("role") != "user":
+        return None
+        
+    content = last_msg.get("content", "")
+    if isinstance(content, list):
+        # Flatten content for text analysis
+        text_content = ""
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "text":
+                text_content += part.get("text", "")
+        content = text_content
+    
+    if not content or len(content) < 5:
+        return None
+
+    # Use UtilityServerManager (Phi-3) for classification and optimization
+    try:
+        from server_manager import UtilityServerManager
+        utility_manager = UtilityServerManager()
+        
+        if not utility_manager.is_ready:
+            await utility_manager.start()
+            
+        import datetime
+        current_date = datetime.date.today().isoformat()
+        
+        prompt = (
+            f"Current Date: {current_date}\n"
+            "Determine if the user message below requires a web search to answer accurately (e.g. for news, dates, prices, or recent events).\n"
+            "If YES, respond with 'YES: [Concise Search Query]'. Rewrite the query to be professional and effective for a search engine.\n"
+            "Expand informal terms like 'tomo' or 'tomorrow' into the actual date if possible, or use 'upcoming' for recent context.\n"
+            "If NO, respond with 'NO'.\n"
+            "CRITICAL: Do not provide an answer. Do not include 'AI:' or 'Response:' prefixes. Only provide the query.\n\n"
+            f"User Message: {content}\n"
+            "Response:"
+        )
+        
+        # Use low temperature and stop on newline to prevent over-generation
+        res = await utility_manager.infer(prompt, temperature=0.0, stop=["\n", "<|end|>", "AI:", "Response:"])
+        response = res.get("content", "").strip().split("\n")[0].strip()
+        
+        if response.upper().startswith("YES"):
+            # Extract query after "YES:" or "YES "
+            query = response
+            if ":" in query:
+                query = query.split(":", 1)[1].strip()
+            elif query.upper().startswith("YES "):
+                query = query[4:].strip()
+            else:
+                # Fallback to original content if format is weird
+                query = content
+            
+            # Final safety strip for common hallucinated prefixes
+            for prefix in ["AI:", "Response:", "Search Query:", "[", "{"]:
+                if query.startswith(prefix):
+                    query = query[len(prefix):].strip()
+                
+            logger.info(f"[INTENT] Search required. Optimized query: {query}")
+            return query
+        else:
+            logger.debug(f"[INTENT] No search required for: {content[:30]}...")
+
+    except Exception as e:
+        logger.error(f"[INTENT] Classification/Optimization failed: {e}")
+        
+    return None
+def _parse_functional_args(args_str: str) -> dict:
+    """Parse k=\"v\" or k='v' pairs from a functional-style string."""
+    pairs = re.findall(r'(\w+)\s*=\s*["\'](.*?)["\']', args_str)
+    return {k: v for k, v in pairs}
 
 
 def _extract_tool_calls_from_text(text: str) -> list[dict] | None:
     """
     Fallback: detect tool calls embedded as text in the content.
-    Many models emit tool calls as JSON blocks like:
-      <tool_call>{"name": "web_browse", "arguments": {"url": "..."}}</tool_call>
-    or as bare JSON objects.
+    Supports JSON tags, markdown blocks, and functional-style XML tags.
     """
     patterns = [
-        # <tool_call>...</tool_call> tags
-        r'<tool_call>\s*(\{.*?\})\s*</tool_call>',
-        # ```json ... ``` blocks containing tool call shapes
-        r'```(?:json)?\s*(\{[^`]*?"name"\s*:\s*"web_(?:browse|search)"[^`]*?\})\s*```',
-        # Bare JSON objects with "name" key matching our tools
-        r'(\{"name"\s*:\s*"web_(?:browse|search)"\s*,\s*"arguments"\s*:\s*\{.*?\}\s*\})',
+        # <tool_call> JSON tags
+        (r'<tool_call>\s*(\{.*?\})\s*</tool_call>', "json"),
+        # ```json blocks
+        (r'```(?:json)?\s*(\{[^`]*?"name"\s*:\s*"web_(?:browse|search)"[^`]*?\})\s*```', "json"),
+        # Bare JSON objects
+        (r'(\{"name"\s*:\s*"web_(?:browse|search)"\s*,\s*"arguments"\s*:\s*\{.*?\}\s*\})', "json"),
+        # <TOOLCALL>[name(args)]</TOOLCALL> format (used by Nemotron/Command-R)
+        (r'<TOOLCALL>\[(.*?)\((.*?)\)\]</TOOLCALL>', "functional"),
     ]
 
     results = []
-    for pattern in patterns:
+    for pattern, ptype in patterns:
         matches = re.findall(pattern, text, re.DOTALL)
         for match in matches:
             try:
-                obj = json.loads(match)
-                name = obj.get("name", "")
-                args = obj.get("arguments", {})
-                if isinstance(args, str):
-                    args = json.loads(args)
+                if ptype == "json":
+                    obj = json.loads(match)
+                    name = obj.get("name", "")
+                    args = obj.get("arguments", {})
+                    if isinstance(args, str):
+                        args = json.loads(args)
+                else:
+                    # functional: match[0] is name, match[1] is args string
+                    name = match[0].strip()
+                    if not name: continue
+                    args = _parse_functional_args(match[1])
+
+                # Skip empty/invalid calls
+                if not name or (not args and ptype == "functional" and "(" not in match[0]):
+                    # If it's just <TOOLCALL>[]</TOOLCALL> or similar
+                    continue
+
+                # Remapping: if model confusingly calls web_browse with a query, treat as search
+                if name == "web_browse" and "query" in args and "url" not in args:
+                    name = "web_search"
+                
+                # Standardize arguments: map 'q' to 'query' for web_search
+                if name == "web_search" and "q" in args and "query" not in args:
+                    args["query"] = args.pop("q")
+
                 tc_id = ''.join(random.choices(string.ascii_letters + string.digits, k=9))
                 results.append({
                     "id": tc_id,
@@ -302,7 +399,19 @@ async def _stream_chat(messages: list, enable_tools: bool, manager: ServerManage
                         content = delta.get("content", "")
                         if content:
                             full_content += content
-                            yield f"data: {json.dumps({'type': 'content', 'content': content})}\n\n"
+                            
+                            # Suppress "pseudo code" (tool call tags) from streaming to user
+                            # We buffer if a tag might be starting
+                            suppress_patterns = [r'<tool_call>', r'</tool_call>', r'<TOOLCALL>', r'</TOOLCALL>']
+                            display_content = content
+                            for p in suppress_patterns:
+                                if p in full_content:
+                                    # This is a bit simplistic; ideally we'd use a real buffer
+                                    # but for now we just strip known tags from the delta
+                                    display_content = display_content.replace(p, "")
+                            
+                            if display_content.strip() or not content.startswith('<'):
+                                yield f"data: {json.dumps({'type': 'content', 'content': display_content})}\n\n"
 
                         # Handle tool calls in the delta
                         if "tool_calls" in delta:
@@ -344,6 +453,9 @@ async def _stream_chat(messages: list, enable_tools: bool, manager: ServerManage
             if fallback:
                 logger.info(f"[FALLBACK] Detected tool calls in text: {fallback}")
                 tool_calls_collected = fallback
+                # Strip the tool call tags from full_content so they don't appear in history
+                for pattern in [r'<tool_call>.*?</tool_call>', r'<TOOLCALL>.*?</TOOLCALL>']:
+                    full_content = re.sub(pattern, '', full_content, flags=re.DOTALL).strip()
 
         # Normalize tool call IDs to exactly 9 alphanumeric chars
         # (required by some model chat templates like Qwen)
@@ -377,8 +489,21 @@ async def _stream_chat(messages: list, enable_tools: bool, manager: ServerManage
             # Notify frontend about tool execution
             yield f"data: {json.dumps({'type': 'tool_start', 'tool': func_name, 'args': func_args})}\n\n"
 
-            result = await execute_tool(func_name, func_args)
-
+            # Execute tool with heartbeat to prevent timeouts
+            # Run tool in a separate task so we can yield keep-alives while waiting
+            import asyncio
+            tool_task = asyncio.create_task(execute_tool(func_name, func_args))
+            
+            while not tool_task.done():
+                try:
+                    # Wait for 1 second at a time
+                    await asyncio.wait_for(asyncio.shield(tool_task), timeout=1.0)
+                except asyncio.TimeoutError:
+                    # Yield a comment or empty event to keep connection alive
+                    yield ": keep-alive\n\n"
+            
+            result = await tool_task
+            
             yield f"data: {json.dumps({'type': 'tool_result', 'tool': func_name, 'result': result})}\n\n"
 
             messages.append({
@@ -386,6 +511,22 @@ async def _stream_chat(messages: list, enable_tools: bool, manager: ServerManage
                 "tool_call_id": tc["id"],
                 "content": result,
             })
+
+        # SPECIAL HANDLING: If web_search returns a synthesis, use it as the FINAL answer.
+        # This prevents the main model from re-summarizing the summary.
+        synthesis_result = None
+        for msg in messages[-len(tool_calls_collected):]:
+            if msg.get("role") == "tool" and "Synthesis of Search Results" in msg.get("content", ""):
+                synthesis_result = msg["content"]
+                break
+        
+        if synthesis_result:
+            logger.info("[CHAT] Synthesis detected. Short-circuiting LLM.")
+            # Remove the "Synthesis of..." prefix for a cleaner chat response if desired, 
+            # or keep it as is. User wanted "routed as is".
+            yield f"data: {json.dumps({'type': 'content', 'content': synthesis_result})}\n\n"
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+            return
 
         # Continue the loop — the model will now generate a response using the tool results
 

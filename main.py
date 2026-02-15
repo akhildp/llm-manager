@@ -19,6 +19,10 @@ async def lifespan(app: FastAPI):
     # Cleanup: stop llama-server if running
     manager = ServerManager()
     await manager.shutdown()
+    
+    from server_manager import UtilityServerManager
+    utility = UtilityServerManager()
+    await utility.stop()
 
 
 app = FastAPI(

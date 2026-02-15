@@ -985,12 +985,13 @@ input[type="checkbox"]:checked::after {
 }
 
 .tool-call-status {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
     padding: 6px 12px;
     font-size: 0.72rem;
     font-weight: 500;
     color: var(--text-muted);
-    display: flex;
-    align-items: center;
     gap: 6px;
 }
 

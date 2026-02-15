@@ -26,6 +26,14 @@ async def execute_tool(name: str, arguments: dict) -> str:
     if not entry:
         return f"Error: Unknown tool '{name}'"
     try:
-        return await entry["handler"](**arguments)
+        handler_coro = entry["handler"](**arguments)
+        # Check if it's an async generator
+        if hasattr(handler_coro, "__aiter__"):
+            final_result = ""
+            async for event in handler_coro:
+                if event["type"] == "result":
+                    final_result = event["content"]
+            return final_result
+        return await handler_coro
     except Exception as e:
         return f"Error executing tool '{name}': {e}"
