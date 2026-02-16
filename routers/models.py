@@ -53,12 +53,20 @@ def _get_model_info(path: Path) -> dict:
 
 # Hardcoded defaults for specific models
 MODEL_DEFAULTS = {
-    "Huihui-Qwen3-VL-4B-Instruct-abliterated-Q8_0": {
+    "Huihui-Qwen3-VL-4B-Instruct-abliterated": {
         "ctx_size": 8192,
         "n_gpu_layers": 28,
         "max_tokens": 2048,
         "temperature": 0.7,
         "repeat_penalty": 1.10,
+        "top_p": 0.9
+    },
+    "Phi-4-mini": {
+        "ctx_size": 8192,
+        "n_gpu_layers": 33,
+        "max_tokens": 4096,  # sensible default
+        "temperature": 0.7,
+        "repeat_penalty": 1.1,
         "top_p": 0.9
     }
 }

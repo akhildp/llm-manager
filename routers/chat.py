@@ -40,6 +40,9 @@ async def chat(request: Request):
         "repeat_penalty": body.get("repeat_penalty", 1.1),
         "top_p": body.get("top_p", 0.9),
     }
+    
+    # Log the settings for user verification
+    print(f" [CHAT] Using Generation Settings: {gen_settings}")
 
     manager = ServerManager()
     if manager.info.state != ServerState.RUNNING:

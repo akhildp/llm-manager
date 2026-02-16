@@ -82,7 +82,12 @@
         });
 
         startModelBtn.addEventListener('click', () => {
-            if (selectedModelPath) window.__startModel(selectedModelPath);
+            if (selectedModelPath) {
+                window.__startModel(selectedModelPath);
+                if (window.innerWidth <= 768) {
+                    closeSidebar();
+                }
+            }
         });
 
         stopModelBtn.addEventListener('click', () => {
@@ -98,7 +103,30 @@
         });
         chatInput.addEventListener('input', autoResizeTextarea);
         clearChatBtn.addEventListener('click', clearChat);
-        sidebarToggle.addEventListener('click', () => sidebar.classList.toggle('open'));
+
+        // Mobile Sidebar Logic
+        const sidebarOverlay = document.getElementById('sidebar-overlay');
+        const sidebarCloseBtn = document.getElementById('sidebar-close-btn');
+
+        function openSidebar() {
+            sidebar.classList.add('open');
+            if (sidebarOverlay) sidebarOverlay.classList.add('visible');
+        }
+
+        function closeSidebar() {
+            sidebar.classList.remove('open');
+            if (sidebarOverlay) sidebarOverlay.classList.remove('visible');
+        }
+
+        sidebarToggle.addEventListener('click', openSidebar);
+
+        if (sidebarCloseBtn) {
+            sidebarCloseBtn.addEventListener('click', closeSidebar);
+        }
+
+        if (sidebarOverlay) {
+            sidebarOverlay.addEventListener('click', closeSidebar);
+        }
 
 
 
@@ -265,6 +293,25 @@
                 selectModel(path);
                 modelSelect.classList.remove('open');
                 selectTrigger.classList.remove('active');
+
+                // Auto-close sidebar on mobile
+                if (window.innerWidth <= 768) {
+                    // Need to access closeSidebar function or toggle class manually?
+                    // Since closeSidebar is defined inside init/setupEventListeners scope, 
+                    // and renderModels is outside, we might have scope issues if closeSidebar is not globally available.
+                    // Checking scope...
+                    // closeSidebar is defined inside setupEventListeners scope (or init scope?) in previous edit?
+                    // Wait, let's check where closeSidebar was defined.
+                    // It was defined inside setupEventListeners.
+                    // renderModels is defined at top level of IIFE.
+                    // So closeSidebar is NOT accessible here directly.
+                    // I should move closeSidebar to top level or duplicate logic.
+                    // Or just use DOM manipulation directly.
+                    const sidebar = document.getElementById('sidebar');
+                    const sidebarOverlay = document.getElementById('sidebar-overlay');
+                    if (sidebar) sidebar.classList.remove('open');
+                    if (sidebarOverlay) sidebarOverlay.classList.remove('visible');
+                }
             });
         });
 
@@ -396,6 +443,18 @@
             if (!selectedModelPath || prevState === 'idle' || prevState === 'starting') {
                 selectedModelPath = data.model_path;
                 loadModelSettings(selectedModelPath);
+            }
+
+            // If running, ensure sliders match the actual running server config
+            if (data.state === 'running') {
+                if (data.ctx_size) {
+                    ctxSizeSlider.value = data.ctx_size;
+                    ctxSizeValue.textContent = data.ctx_size;
+                }
+                if (data.n_gpu_layers !== undefined) {
+                    gpuLayersSlider.value = data.n_gpu_layers;
+                    gpuLayersValue.textContent = data.n_gpu_layers;
+                }
             }
         }
 
